@@ -1,0 +1,579 @@
+package com.example.finalapp;
+
+import androidx.annotation.NonNull;
+import androidx.appcompat.app.AppCompatActivity;
+import androidx.core.app.ActivityCompat;
+import androidx.core.content.ContextCompat;
+
+import android.Manifest;
+import android.content.pm.PackageManager;
+import android.media.AudioFormat;
+import android.media.AudioManager;
+import android.media.AudioRecord;
+import android.media.AudioTrack;
+import android.media.MediaPlayer;
+import android.media.MediaRecorder;
+import android.os.Bundle;
+import android.os.Environment;
+import android.provider.ContactsContract;
+import android.view.View;
+import android.widget.Button;
+import android.widget.TextView;
+import android.widget.Toast;
+
+import com.jjoe64.graphview.GraphView;
+import com.jjoe64.graphview.series.BarGraphSeries;
+import com.jjoe64.graphview.series.DataPoint;
+import com.jjoe64.graphview.series.PointsGraphSeries;
+
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileNotFoundException;
+import java.io.FileOutputStream;
+import java.io.FileWriter;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStreamWriter;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.util.UUID;
+
+
+public class MainActivity extends AppCompatActivity {
+
+    //xml init
+    private TextView detect;
+    private GraphView graph;
+    private Button play;
+    private TextView problem;
+
+    //Record settings
+    private static final int RECORDER_BPP = 16;
+    private static final String AUDIO_RECORDER_FILE_EXT_WAV = ".wav";
+    private static final String AUDIO_RECORDER_FOLDER = "AudioRecorder";
+    private static final String AUDIO_RECORDER_TEMP_FILE = "record_temp.raw";
+    private static final int RECORDER_SAMPLERATE = 44100;
+    private static final int RECORDER_CHANNELS = AudioFormat.CHANNEL_IN_MONO;
+    private static final int RECORDER_AUDIO_ENCODING = AudioFormat.ENCODING_PCM_16BIT;
+
+    private AudioRecord recorder = null;
+    private int bufferSize = 0;
+    private Thread recordingThread = null;
+    private boolean isRecording = false;
+
+    //file error statement
+    final int REQUEST_PERMISSION_CODE = 1000;
+    File extStore1 = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
+    String extStore = Environment.getExternalStorageDirectory().getPath();
+
+    //fft part
+    byte[] music;
+    short[] music2Short;
+    InputStream is;
+    AudioTrack audioOut = null;
+    int deltaF = RECORDER_SAMPLERATE / 1024;
+    private Thread calculThread;
+    int boucle = 0;
+
+    int minSize = AudioTrack.getMinBufferSize(RECORDER_SAMPLERATE, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT);
+
+    //play/stop part
+    MediaPlayer mediaPlayer;
+
+    //error management
+    int boucleInit = 0;
+
+    boolean Play;
+    private Thread managementThread;
+
+    boolean detected;
+    int time_detected;
+    long time_start;
+    long time_end;
+    long timer = 0;
+
+    @Override
+    public void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        setContentView(R.layout.activity_main);
+
+        if (!checkPermissionFromDevice()) {
+            RequestPermission();
+        }
+
+        detect = findViewById(R.id.detection);
+        graph = findViewById(R.id.graph);
+        problem = findViewById(R.id.problem);
+        play = findViewById(R.id.play);
+
+        problem.setText("problem");
+        detect.setText("hello");
+
+        bufferSize = AudioRecord.getMinBufferSize(RECORDER_SAMPLERATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT);
+
+
+        startRecording();
+        recordManagementThread();
+
+        play.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                Toast.makeText(MainActivity.this, "Playing", Toast.LENGTH_SHORT).show();
+                play17();
+                time_start=System.currentTimeMillis();
+                Play=true;
+            }
+        });
+
+    }
+
+    private void recordManagementThread() {
+        managementThread = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                while (true) {
+
+                    try {
+                        Thread.sleep(500);
+                    } catch (InterruptedException e) {
+                        e.printStackTrace();
+                    }
+                    try {
+                        FileChange();
+                    } catch (IOException e) {
+                        e.printStackTrace();
+                    }
+
+                    try {
+                        startCalculating();
+                    } catch (InterruptedException e) {
+                        e.printStackTrace();
+                    }
+                }
+
+            }
+
+
+        }, "Calculating thread");
+
+        managementThread.start();
+    }
+
+    private String getFilename() throws IOException {
+        String filepath = Environment.getExternalStorageDirectory().getPath();
+        File file = new File(filepath, AUDIO_RECORDER_FOLDER);
+
+        if (!file.exists()) {
+            file.createNewFile();
+        }
+
+        return (extStore + "/" + "AudioRead" + AUDIO_RECORDER_FILE_EXT_WAV);
+    }
+
+    private String getTempFilename() throws IOException {
+        //String filepath = Environment.getExternalStorageDirectory().getPath();
+        String filepath = Environment.getExternalStorageDirectory().getPath();
+        File file = new File(filepath);
+
+        if (!file.exists()) {
+            file.createNewFile();
+        }
+
+        File tempFile = new File(filepath);
+
+        if (tempFile.exists())
+            tempFile.delete();
+
+        return (file.getAbsolutePath() + "/" + AUDIO_RECORDER_TEMP_FILE);
+    }
+
+    private void startCalculating() throws InterruptedException {
+        calculThread = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                playAudio();
+                if (is != null) {
+
+                    int i;
+                    FFT a = new FFT(1024, RECORDER_SAMPLERATE);
+                    //buffer with the signal
+                    try {
+                        while (((i = is.read(music)) != -1)) {
+                            ByteBuffer.wrap(music).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer().get(music2Short);
+                        }
+                    } catch (IOException e) {
+                        e.printStackTrace();
+                    }
+                    a.forward(Tofloat(music2Short));
+
+                    BarGraphSeries<DataPoint> series = new BarGraphSeries<>(generateData(a, 800));
+                    series.resetData(generateData(a, 800));
+
+                    graph.addSeries(series);
+                    int frequency1 = 17000;
+                    int frequency2 = 18000;
+                    boucle++;
+                    if (detection17(frequency1, a, boucle)) {
+                        time_detected++;
+                    } else {
+                        time_detected = 0;
+                    }
+                    if (time_detected >= 2) {
+                        detected = true;
+                    }
+                    if (Play) {
+                        if (detection18(frequency1, a, boucle) && Play) {
+                            time_end = System.currentTimeMillis();
+                            Play=false;
+                            timer=time_end-time_start;
+                            problem.setText("time " + timer + "ms \n");
+                        }
+                    }
+                }
+            }
+        }, "Calculating thread");
+
+        calculThread.start();
+    }
+
+    private boolean detection17(int frequency, FFT a, int boucle) {
+        int x = frequency / 43;
+        int j = Math.round(x);
+        float seuil = Math.abs(a.real[j] * a.real[j] + a.imag[j] * a.imag[j]) / 100000;
+        int aff = Math.round(seuil);
+        if (aff >= 1000) {
+            detect.setText("boucle n°:" + boucle + "detected : " + aff + "\n");
+            play18();
+            return true;
+        } else {
+            detect.setText("boucle n°:" + boucle + "not detected : " + aff + "\n");
+            return false;
+        }
+    }
+
+    private boolean detection18(int frequency, FFT a, int boucle) {
+        int x = frequency / 43;
+        int j = Math.round(x);
+        float seuil = Math.abs(a.real[j] * a.real[j] + a.imag[j] * a.imag[j]) / 100000;
+        int aff = Math.round(seuil);
+        if (aff >= 1000) {
+            problem.setText("boucle n°:" + boucle + "detected : " + aff + "\n");
+            return true;
+        } else {
+            problem.setText("boucle n°:" + boucle + "not detected : " + aff + "\n");
+            return false;
+        }
+    }
+
+    private void startRecording() {
+        recorder = new AudioRecord(MediaRecorder.AudioSource.MIC,
+                RECORDER_SAMPLERATE, RECORDER_CHANNELS, RECORDER_AUDIO_ENCODING, bufferSize);
+
+        int i = recorder.getState();
+        if (i == 1)
+            recorder.startRecording();
+
+        isRecording = true;
+
+        recordingThread = new Thread(new Runnable() {
+
+            @Override
+            public void run() {
+                try {
+                    writeAudioDataToFile();
+                } catch (IOException e) {
+                    e.printStackTrace();
+                }
+            }
+        }, "AudioRecorder Thread");
+
+        recordingThread.start();
+    }
+
+    private void writeAudioDataToFile() throws IOException {
+        byte data[] = new byte[bufferSize];
+        //byte bufferFFT[] = new byte[bufferSize];
+        String filename = getTempFilename();
+        FileOutputStream os = null;
+
+        try {
+            os = new FileOutputStream(filename);
+        } catch (FileNotFoundException e) {
+// TODO Auto-generated catch block
+            e.printStackTrace();
+        }
+
+        int read = 0;
+
+        //FFT a = new FFT(1024, RECORDER_SAMPLERATE);
+        if (null != os) {
+            while (isRecording) {
+                read = recorder.read(data, 0, bufferSize);
+
+                //bufferFFT=data;
+                if (AudioRecord.ERROR_INVALID_OPERATION != read) {
+                    try {
+                        os.write(data);
+                    } catch (IOException e) {
+                        e.printStackTrace();
+                    }
+                    //ByteBuffer.wrap(bufferFFT).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer().get(music2Short);
+                    /*a.forward(Tofloat(music2Short));
+                    BarGraphSeries<DataPoint> series = new BarGraphSeries<>(generateData(a, 800));
+                    series.resetData(generateData(a, 800));
+
+                    graph.addSeries(series);*/
+                }
+            }
+
+            try {
+                os.close();
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        }
+    }
+
+    private void FileChange() throws IOException {
+        copyWaveFile(getTempFilename(), getFilename());
+        //deleteTempFile();
+    }
+
+    private void deleteTempFile() throws IOException {
+        File file = new File(getTempFilename());
+
+        file.delete();
+    }
+
+    private void copyWaveFile(String inFilename, String outFilename) {
+        FileInputStream in = null;
+        FileOutputStream out = null;
+        long totalAudioLen = 0;
+        long totalDataLen = totalAudioLen + 36;
+        long longSampleRate = RECORDER_SAMPLERATE;
+        int channels = 1;
+        long byteRate = RECORDER_BPP * RECORDER_SAMPLERATE * channels / 8;
+
+        byte[] data = new byte[bufferSize];
+
+        try {
+            in = new FileInputStream(inFilename);
+            out = new FileOutputStream(outFilename);
+            totalAudioLen = in.getChannel().size();
+            totalDataLen = totalAudioLen + 36;
+
+            AppLog.logString("File size: " + totalDataLen);
+
+            WriteWaveFileHeader(out, totalAudioLen, totalDataLen,
+                    longSampleRate, channels, byteRate);
+
+            while (in.read(data) != -1) {
+                out.write(data);
+            }
+
+            in.close();
+            out.close();
+        } catch (FileNotFoundException e) {
+            e.printStackTrace();
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+    private void WriteWaveFileHeader(
+            FileOutputStream out, long totalAudioLen,
+            long totalDataLen, long longSampleRate, int channels,
+            long byteRate) throws IOException {
+
+        byte[] header = new byte[44];
+
+        header[0] = 'R'; // RIFF/WAVE header
+        header[1] = 'I';
+        header[2] = 'F';
+        header[3] = 'F';
+        header[4] = (byte) (totalDataLen & 0xff);
+        header[5] = (byte) ((totalDataLen >> 8) & 0xff);
+        header[6] = (byte) ((totalDataLen >> 16) & 0xff);
+        header[7] = (byte) ((totalDataLen >> 24) & 0xff);
+        header[8] = 'W';
+        header[9] = 'A';
+        header[10] = 'V';
+        header[11] = 'E';
+        header[12] = 'f'; // 'fmt ' chunk
+        header[13] = 'm';
+        header[14] = 't';
+        header[15] = ' ';
+        header[16] = 16; // 4 bytes: size of 'fmt ' chunk
+        header[17] = 0;
+        header[18] = 0;
+        header[19] = 0;
+        header[20] = 1; // format = 1
+        header[21] = 0;
+        header[22] = (byte) channels;
+        header[23] = 0;
+        header[24] = (byte) (longSampleRate & 0xff);
+        header[25] = (byte) ((longSampleRate >> 8) & 0xff);
+        header[26] = (byte) ((longSampleRate >> 16) & 0xff);
+        header[27] = (byte) ((longSampleRate >> 24) & 0xff);
+        header[28] = (byte) (byteRate & 0xff);
+        header[29] = (byte) ((byteRate >> 8) & 0xff);
+        header[30] = (byte) ((byteRate >> 16) & 0xff);
+        header[31] = (byte) ((byteRate >> 24) & 0xff);
+        header[32] = (byte) (2 * 16 / 8); // block align
+        header[33] = 0;
+        header[34] = RECORDER_BPP; // bits per sample
+        header[35] = 0;
+        header[36] = 'd';
+        header[37] = 'a';
+        header[38] = 't';
+        header[39] = 'a';
+        header[40] = (byte) (totalAudioLen & 0xff);
+        header[41] = (byte) ((totalAudioLen >> 8) & 0xff);
+        header[42] = (byte) ((totalAudioLen >> 16) & 0xff);
+        header[43] = (byte) ((totalAudioLen >> 24) & 0xff);
+
+        out.write(header, 0, 44);
+    }
+
+    private boolean checkPermissionFromDevice() {
+        int result_from_storage_permission = ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE);
+        int record_audio_result = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO);
+        return (result_from_storage_permission == PackageManager.PERMISSION_GRANTED) &&
+                (record_audio_result == PackageManager.PERMISSION_GRANTED);
+    }
+
+    private void RequestPermission(){
+        ActivityCompat.requestPermissions(this, new String[]{
+                Manifest.permission.RECORD_AUDIO,
+                Manifest.permission.WRITE_EXTERNAL_STORAGE
+        }, REQUEST_PERMISSION_CODE);
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions, @NonNull int[] grantResults) {
+        switch (requestCode)
+        {
+            case REQUEST_PERMISSION_CODE:{
+                if(grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED){
+                    Toast.makeText(MainActivity.this, "Permission granted", Toast.LENGTH_SHORT).show();
+                }
+                else{
+                    Toast.makeText(MainActivity.this, "Permission denied", Toast.LENGTH_SHORT).show();
+                }
+            }
+            break;
+        }
+
+    }
+
+    public void initialize(){
+
+        boucleInit++;
+        File initialFile = null;
+        try {
+            initialFile = new File(getFilename());
+            //problem.setText("init file succeed" + boucleInit);
+        } catch (IOException e) {
+            e.printStackTrace();
+            //problem.setText("init fft:");
+        }
+        try{
+            is = new FileInputStream(initialFile);
+            //problem.setText("init is succeed"+ boucleInit);
+        }
+        catch (IOException e){
+            e.printStackTrace();
+        }
+
+
+        audioOut = new AudioTrack(
+                AudioManager.STREAM_MUSIC,          // Stream Type
+                RECORDER_SAMPLERATE,                         // Initial Sample Rate in Hz
+                AudioFormat.CHANNEL_OUT_MONO,       // Channel Configuration
+                AudioFormat.ENCODING_PCM_16BIT,     // Audio Format
+                minSize,                            // Buffer Size in Bytes
+                AudioTrack.MODE_STREAM);            // Streaming static Buffer
+
+    }
+
+    public void playAudio() {
+
+        this.initialize();
+
+
+        if ( (minSize/2) % 2 != 0 ) {
+            /*If minSize divided by 2 is odd, then subtract 1 and make it even*/
+            music2Short     = new short [((minSize /2) - 1)/2];
+            music           = new byte  [(minSize/2) - 1];
+        }
+        else {
+            /* Else it is even already */
+            music2Short     = new short [minSize/2]; //pour motorola sinon /4
+            music           = new byte  [minSize];  //pour motorola sinon /2
+        }
+
+    }
+
+    public float[] Tofloat(short[] s){
+        int len = s.length;
+        float[] f= new float[len];
+        for (int i=0;i<len;i++){
+            f[i]=s[i];
+        }
+        return f;
+    }
+
+    private DataPoint[] generateData(FFT a, int total) {
+        int x;
+        double y;
+        float c;
+        float b;
+        DataPoint[] values = new DataPoint[total];
+        for (int j=0;j<total;j++){
+            x=j*deltaF;
+            c=a.real[j]*a.real[j];
+            b=a.imag[j]*a.imag[j];
+            y=Math.abs(b+c)/1000000000;
+            DataPoint v = new DataPoint(x,y);
+            values[j]=v;
+        }
+        return values;
+    }
+
+    public void play17(){
+        problem.setText("is sending a signal");
+        if (mediaPlayer == null){
+            mediaPlayer = new MediaPlayer();
+
+            mediaPlayer=MediaPlayer.create(MainActivity.this, R.raw.son17);
+            mediaPlayer.start();
+        }
+        else{
+            mediaPlayer.stop();
+            mediaPlayer.release();
+            mediaPlayer=MediaPlayer.create(MainActivity.this, R.raw.son17);
+
+            mediaPlayer.start();
+        }
+    }
+
+    public void play18(){
+        problem.setText("is sending a signal");
+        if (mediaPlayer == null){
+            mediaPlayer = new MediaPlayer();
+
+            mediaPlayer=MediaPlayer.create(MainActivity.this, R.raw.son18);
+
+            mediaPlayer.start();
+        }
+        else{
+            mediaPlayer.stop();
+            mediaPlayer.release();
+            mediaPlayer=MediaPlayer.create(MainActivity.this, R.raw.son18);
+
+            mediaPlayer.start();
+        }
+
+
+    }
+}
