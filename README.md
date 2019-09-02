@@ -1,4 +1,4 @@
-# FinalApp
+# Sound Localizer
 
 SoundLocalizer
 
